@@ -89,6 +89,7 @@ then
     VALIDATE $? "Loading data into MySQL"
 else
     echo -e "Data is already loaded into MySQL ... $Y SKIPPING $N"
+    
 fi
 
 systemctl restart shipping &>>$LOG_FILE
