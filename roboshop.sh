@@ -1,40 +1,124 @@
 #!/bin/bash
 
+# === CONFIGURATION ===
 AMI_ID="ami-09c813fb71547fc4f"
-SG_ID="sg-068450c7fc6b1022d" # replace with your SG ID
-INSTANCES=("mongodb" "redis" "mysql" "rabbitmq" "catalogue" "user" "cart" "shipping" "payment" "dispatch" "frontend")
-ZONE_ID="Z00631643FZP9GXC6CVLE" # replace with your ZONE ID
-DOMAIN_NAME="daws84s.xyz" # replace with your domain
+INSTANCE_TYPE="t3.micro"
+HOSTED_ZONE_ID="Z00631643FZP9GXC6CVLE"
+DOMAIN_SUFFIX="daws84s.xyz"
+REGION="us-east-1"
+SECURITY_GROUP_ID="sg-068450c7fc6b1022d"
 
-#for instance in ${INSTANCES[@]}
-for instance in $@
-do
-    INSTANCE_ID=$(aws ec2 run-instances --image-id ami-09c813fb71547fc4f --instance-type t3.micro --security-group-ids sg-068450c7fc6b1022d --tag-specifications "ResourceType=instance,Tags=[{Key=Name, Value=$instance}]" --query "Instances[0].InstanceId" --output text)
-    if [ $instance != "frontend" ]
-    then
-        IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].PrivateIpAddress" --output text)
-        RECORD_NAME="$instance.$DOMAIN_NAME"
-    else
-        IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
-        RECORD_NAME="$DOMAIN_NAME"
+# === Instance Names ===
+SERVICES=("MongoDB" "Catalogue" "Redis" "User" "Cart" "MySQL" "Shipping" "RabbitMQ" "Payment" "Dispatch" "Frontend")
+
+echo "Starting deployment..."
+
+# === Instance tracking ===
+declare -A INSTANCE_IDS
+declare -A PRIVATE_IPS
+declare -A PUBLIC_IPS
+
+# === Function to get existing instance by name ===
+get_instance_id_by_name() {
+  local NAME=$1
+  aws ec2 describe-instances \
+    --region "$REGION" \
+    --filters "Name=tag:Name,Values=$NAME" "Name=instance-state-name,Values=running,stopped" \
+    --query 'Reservations[].Instances[].InstanceId' \
+    --output text
+}
+
+# === Create or reuse instances ===
+for SERVICE in "${SERVICES[@]}"; do
+  echo "Checking instance for $SERVICE..."
+  EXISTING_ID=$(get_instance_id_by_name "$SERVICE")
+
+  if [ -n "$EXISTING_ID" ]; then
+    echo "$SERVICE already exists: $EXISTING_ID"
+    INSTANCE_IDS["$SERVICE"]=$EXISTING_ID
+  else
+    echo "Launching new instance for $SERVICE..."
+    INSTANCE_ID=$(aws ec2 run-instances \
+      --image-id "$AMI_ID" \
+      --instance-type "$INSTANCE_TYPE" \
+      --security-group-ids "$SECURITY_GROUP_ID" \
+      --region "$REGION" \
+      --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$SERVICE}]" \
+      --query 'Instances[0].InstanceId' --output text)
+
+    if [ -z "$INSTANCE_ID" ]; then
+      echo "Failed to launch $SERVICE"
+      continue
     fi
-    echo "$instance IP address: $IP"
 
-    aws route53 change-resource-record-sets \
-    --hosted-zone-id $ZONE_ID \
-    --change-batch '
-    {
-        "Comment": "Creating or Updating a record set for cognito endpoint"
-        ,"Changes": [{
-        "Action"              : "UPSERT"
-        ,"ResourceRecordSet"  : {
-            "Name"              : "'$RECORD_NAME'"
-            ,"Type"             : "A"
-            ,"TTL"              : 1
-            ,"ResourceRecords"  : [{
-                "Value"         : "'$IP'"
-            }]
-        }
-        }]
-    }'
+    INSTANCE_IDS["$SERVICE"]=$INSTANCE_ID
+    echo "$SERVICE - Instance ID: $INSTANCE_ID"
+  fi
 done
+
+# === Wait for all instances to run ===
+echo "Waiting for instances to be in 'running' state..."
+aws ec2 wait instance-running --instance-ids "${INSTANCE_IDS[@]}" --region "$REGION"
+
+# === Get IPs ===
+for SERVICE in "${SERVICES[@]}"; do
+  INSTANCE_ID=${INSTANCE_IDS["$SERVICE"]}
+
+  PRIVATE_IP=$(aws ec2 describe-instances \
+    --instance-ids "$INSTANCE_ID" \
+    --region "$REGION" \
+    --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+    --output text)
+
+  PRIVATE_IPS["$SERVICE"]=$PRIVATE_IP
+
+  if [ "$SERVICE" == "Frontend" ]; then
+    PUBLIC_IP=$(aws ec2 describe-instances \
+      --instance-ids "$INSTANCE_ID" \
+      --region "$REGION" \
+      --query 'Reservations[0].Instances[0].PublicIpAddress' \
+      --output text)
+    PUBLIC_IPS["$SERVICE"]=$PUBLIC_IP
+  fi
+
+  echo "$SERVICE - Private IP: $PRIVATE_IP, Public IP: ${PUBLIC_IPS[$SERVICE]}"
+done
+
+# === Create Route 53 Records ===
+echo "Creating Route 53 A records..."
+
+for SERVICE in "${SERVICES[@]}"; do
+  RECORD_NAME="${SERVICE,,}.$DOMAIN_SUFFIX"  # lowercase
+  if [ "$SERVICE" == "Frontend" ]; then
+    IP=${PUBLIC_IPS["$SERVICE"]}
+  else
+    IP=${PRIVATE_IPS["$SERVICE"]}
+  fi
+
+  cat > change-${SERVICE}.json <<EOF
+{
+  "Comment": "Route 53 record for $SERVICE",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "$RECORD_NAME",
+        "Type": "A",
+        "TTL": 1,
+        "ResourceRecords": [{ "Value": "$IP" }]
+      }
+    }
+  ]
+}
+EOF
+
+  aws route53 change-resource-record-sets \
+    --hosted-zone-id "$HOSTED_ZONE_ID" \
+    --region "$REGION" \
+    --change-batch file://change-${SERVICE}.json
+
+  rm -f change-${SERVICE}.json
+  echo "DNS record created: $RECORD_NAME -> $IP"
+done
+
+echo "Deployment completed."
