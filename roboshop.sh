@@ -1,15 +1,15 @@
 #!/bin/bash
 
 AMI_ID="ami-09c813fb71547fc4f"
-SG_ID="sg-068450c7fc6b1022d" # replace with your SG ID
+SG_ID="sg-07f1758029cfa97a5" # replace with your SG ID
 INSTANCES=("mongodb" "redis" "mysql" "rabbitmq" "catalogue" "user" "cart" "shipping" "payment" "dispatch" "frontend")
-ZONE_ID="Z00631643FZP9GXC6CVLE" # replace with your ZONE ID
+ZONE_ID="Z043421238YSBXXBAXKLF" # replace with your ZONE ID
 DOMAIN_NAME="daws84s.xyz" # replace with your domain
 
 #for instance in ${INSTANCES[@]}
 for instance in $@
 do
-    INSTANCE_ID=$(aws ec2 run-instances --image-id ami-09c813fb71547fc4f --instance-type t3.micro --security-group-ids sg-068450c7fc6b1022d --tag-specifications "ResourceType=instance,Tags=[{Key=Name, Value=$instance}]" --query "Instances[0].InstanceId" --output text)
+    INSTANCE_ID=$(aws ec2 run-instances --image-id ami-09c813fb71547fc4f --instance-type t3.micro --security-group-ids sg-07f1758029cfa97a5 --tag-specifications "ResourceType=instance,Tags=[{Key=Name, Value=$instance}]" --query "Instances[0].InstanceId" --output text)
     if [ $instance != "frontend" ]
     then
         IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].PrivateIpAddress" --output text)
@@ -37,5 +37,4 @@ do
         }
         }]
     }'
-done
-
+done 
